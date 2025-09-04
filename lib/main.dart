@@ -27,6 +27,8 @@ class PongApp extends StatelessWidget {
   }
 }
 
+enum GameState { ready, playing, gameOver }
+
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
   @override
@@ -39,29 +41,30 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   final double _paddleWidth = 100.0;
   final double _paddleHeight = 14.0;
 
-  // Estado de animación
+  // Animación
   late final Ticker _ticker;
   Duration _lastTick = Duration.zero;
   Size _size = Size.zero;
 
-  // Estado de juego
+  // Juego
+  GameState _state = GameState.ready;
   late Offset _ball;      // centro de la pelota
   late Offset _vel;       // píxeles/segundo
   late double _paddleCx;  // centro X de la paleta
+  int _score = 0;
+  int _lives = 3;
+  double _speedMultiplier = 1.0;
+
   Rect get _paddle => Rect.fromCenter(
         center: Offset(_paddleCx, _size.height - 40),
         width: _paddleWidth,
         height: _paddleHeight,
       );
 
-  int _score = 0;
-
   @override
   void initState() {
     super.initState();
-    _ball = const Offset(100, 100);
-    _vel  = const Offset(180, 240);
-    _paddleCx = 150;
+    _resetScene(hard: true);
     _ticker = createTicker(_onTick)..start();
   }
 
@@ -74,22 +77,47 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   void _ensureLayout(Size size) {
     if (_size == size) return;
     _size = size;
-
-    // Centrar escena al conocer el tamaño
-    _ball = Offset(size.width / 2, size.height / 3);
+    _centerBall(towardsDown: true);
     _paddleCx = size.width / 2;
   }
 
-  void _resetBall({bool towardsDown = true}) {
-    // Resetea pelota al centro con dirección aleatoria
+  void _resetScene({bool hard = false}) {
+    // hard = true: reinicia todo (score, vidas, velocidad); false: reseteo parcial (pérdida de vida)
+    if (hard) {
+      _score = 0;
+      _lives = 3;
+      _speedMultiplier = 1.0;
+    }
+    _centerBall(towardsDown: true);
+    _paddleCx = _size == Size.zero ? 150 : _size.width / 2;
+    _state = GameState.ready;
+  }
+
+  void _centerBall({required bool towardsDown}) {
     final rand = Random();
-    final dirX = (rand.nextBool() ? 1 : -1) * (140 + rand.nextInt(160));
-    final dirY = (towardsDown ? 1 : -1) * (180 + rand.nextInt(180));
-    _ball = Offset(_size.width / 2, _size.height / 3);
-    _vel = Offset(dirX.toDouble(), dirY.toDouble());
+    final baseX = (rand.nextBool() ? 1 : -1) * (160 + rand.nextInt(120));
+    final baseY = (towardsDown ? 1 : -1) * (220 + rand.nextInt(160));
+    if (_size == Size.zero) {
+      _ball = const Offset(120, 120);
+    } else {
+      _ball = Offset(_size.width / 2, _size.height / 3);
+    }
+    _vel = Offset(baseX.toDouble(), baseY.toDouble()) * _speedMultiplier;
+  }
+
+  void _startGame() {
+    if (_state == GameState.ready || _state == GameState.gameOver) {
+      _state = GameState.playing;
+      _lastTick = Duration.zero; // resync
+      setState(() {});
+    }
   }
 
   void _onTick(Duration now) {
+    if (_state != GameState.playing) {
+      _lastTick = now; // mantén el reloj actualizado para evitar salto al reanudar
+      return;
+    }
     if (_lastTick == Duration.zero) {
       _lastTick = now;
       return;
@@ -119,31 +147,38 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       _vel = Offset(_vel.dx, -_vel.dy);
     }
 
-    // Colisión con paleta (cuando venimos bajando y cruzamos su borde superior)
+    // Colisión paleta
     final paddle = _paddle;
     final hitsHorizontally = x >= paddle.left && x <= paddle.right;
     final crossedTop = (prev.dy + _ballRadius) <= paddle.top && (y + _ballRadius) >= paddle.top;
     final goingDown = _vel.dy > 0;
 
     if (goingDown && hitsHorizontally && crossedTop) {
-      // Reposicionar justo encima para evitar "pegado"
       y = paddle.top - _ballRadius;
 
-      // "Inglés" según punto de impacto
+      // Inglés/ángulo según punto de impacto + subida leve de dificultad
       final offsetX = ((x - paddle.center.dx) / (paddle.width / 2)).clamp(-1.0, 1.0);
-      // Aumenta ligeramente la velocidad y aplica ángulo
-      final newVx = (_vel.dx + 220 * offsetX).clamp(-500, 500);
-      final newVy = -_vel.dy.abs() * 1.05; // rebote hacia arriba + leve aceleración
+      _speedMultiplier = min(_speedMultiplier * 1.04, 2.2); // límite para que no sea imposible
+      final baseBoost = 240.0 * _speedMultiplier;
+
+      final newVx = (_vel.dx + baseBoost * offsetX).clamp(-600, 600);
+      final newVy = -_vel.dy.abs() * (1.02 + 0.02 * _speedMultiplier);
 
       _vel = Offset(newVx.toDouble(), newVy.toDouble());
       _score += 1;
     }
 
-    // Piso (fallo): reinicia pelota y marcador a cero
+    // Piso: pierdes una vida o Game Over
     if (y - _ballRadius > _size.height) {
-      _score = 0;
-      _resetBall(towardsDown: true);
-      setState(() {}); // actualiza score y posición de reset
+      _lives -= 1;
+      if (_lives <= 0) {
+        _state = GameState.gameOver;
+      } else {
+        _centerBall(towardsDown: true);
+        // Pequeña penalización de dificultad
+        _speedMultiplier = max(1.0, _speedMultiplier * 0.95);
+      }
+      setState(() {});
       return;
     }
 
@@ -153,11 +188,13 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   }
 
   void _onDrag(DragUpdateDetails d) {
+    // Permite ajustar la paleta en ready/playing para “acomodarla” antes de empezar
     if (_size == Size.zero) return;
     _paddleCx = (_paddleCx + d.delta.dx).clamp(
       _paddleWidth / 2,
       _size.width - _paddleWidth / 2,
     );
+    setState(() {});
   }
 
   @override
@@ -172,8 +209,17 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onPanUpdate: _onDrag,
+              onTap: () {
+                if (_state == GameState.ready) {
+                  _startGame();
+                } else if (_state == GameState.gameOver) {
+                  _resetScene(hard: true);
+                  setState(() {});
+                }
+              },
               child: Stack(
                 children: [
+                  // Juego
                   Positioned.fill(
                     child: CustomPaint(
                       painter: _GamePainter(
@@ -183,6 +229,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                       ),
                     ),
                   ),
+
+                  // HUD superior: título, paso, marcador y vidas
                   Positioned(
                     top: 8,
                     left: 12,
@@ -194,14 +242,28 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                             style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
                         Row(
                           children: [
-                            const Text("Paso 05: control + colisión",
+                            const Text("Paso 06: inicio + game over",
                                 style: TextStyle(fontSize: 14, color: Colors.white70)),
                             const SizedBox(width: 12),
-                            _ScoreBadge(score: _score),
+                            _Pill(text: "Puntos: $_score"),
+                            const SizedBox(width: 8),
+                            _Pill(text: "Vidas: $_lives"),
                           ],
                         ),
                       ],
                     ),
+                  ),
+
+                  // Overlays: Ready / Game Over
+                  if (_state == GameState.ready) _overlayCenter(
+                    title: "Toca para comenzar",
+                    subtitle: "Arrastra para mover la paleta",
+                    icon: Icons.play_arrow_rounded,
+                  ),
+                  if (_state == GameState.gameOver) _overlayCenter(
+                    title: "Game Over",
+                    subtitle: "Toca para reiniciar",
+                    icon: Icons.replay_rounded,
                   ),
                 ],
               ),
@@ -209,6 +271,43 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
           ),
         );
       },
+    );
+  }
+
+  Widget _overlayCenter({required String title, required String subtitle, required IconData icon}) {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withOpacity(0.35),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F111A).withOpacity(0.9),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 56, color: Colors.greenAccent),
+                  const SizedBox(height: 12),
+                  Text(title,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(subtitle,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 14, color: Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -272,9 +371,9 @@ class _GamePainter extends CustomPainter {
   }
 }
 
-class _ScoreBadge extends StatelessWidget {
-  const _ScoreBadge({super.key, required this.score});
-  final int score;
+class _Pill extends StatelessWidget {
+  const _Pill({super.key, required this.text});
+  final String text;
 
   @override
   Widget build(BuildContext context) {
@@ -284,10 +383,7 @@ class _ScoreBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: Colors.white24),
       ),
-      child: Text(
-        "Puntos: $score",
-        style: const TextStyle(fontWeight: FontWeight.w600),
-      ),
+      child: Text(text, style: const TextStyle(fontWeight: FontWeight.w600)),
     );
   }
 }
