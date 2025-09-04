@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -57,6 +58,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   int _lives = 3;
   double _speedMultiplier = 1.0;
 
+  // Récord (persistente)
+  int _best = 0;
+
   // Audio
   final _bounceSfx = AudioPlayer()..setReleaseMode(ReleaseMode.stop);
   final _gameOverSfx = AudioPlayer()..setReleaseMode(ReleaseMode.stop);
@@ -67,7 +71,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
         height: _paddleHeight,
       );
 
-  // Teclado (P para pausar/reanudar)
+  // Teclado
   final FocusNode _focus = FocusNode();
 
   @override
@@ -76,27 +80,39 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     _resetScene(hard: true);
     _ticker = createTicker(_onTick)..start();
     _preloadSounds();
+    _loadBestScore(); // <<-- Cargar récord guardado
   }
 
   Future<void> _preloadSounds() async {
-    // Precarga ligera (si los archivos faltan, evitamos crashear con try/catch)
     try { await _bounceSfx.setSourceAsset('assets/sounds/bounce.mp3'); } catch (_) {}
     try { await _gameOverSfx.setSourceAsset('assets/sounds/game_over.mp3'); } catch (_) {}
   }
 
-  Future<void> _playBounce() async {
+  Future<void> _loadBestScore() async {
     try {
-      // Para evitar latencia en web, usar un nuevo player corto también funciona, pero este basta
-      await _bounceSfx.stop();
-      await _bounceSfx.play(AssetSource('assets/sounds/bounce.mp3'));
+      final prefs = await SharedPreferences.getInstance();
+      _best = prefs.getInt('best_score') ?? 0;
+      if (mounted) setState(() {});
     } catch (_) {}
   }
 
+  Future<void> _maybeSaveBest() async {
+    if (_score > _best) {
+      _best = _score;
+      setState(() {});
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt('best_score', _best);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _playBounce() async {
+    try { await _bounceSfx.stop(); await _bounceSfx.play(AssetSource('assets/sounds/bounce.mp3')); } catch (_) {}
+  }
+
   Future<void> _playGameOver() async {
-    try {
-      await _gameOverSfx.stop();
-      await _gameOverSfx.play(AssetSource('assets/sounds/game_over.mp3'));
-    } catch (_) {}
+    try { await _gameOverSfx.stop(); await _gameOverSfx.play(AssetSource('assets/sounds/game_over.mp3')); } catch (_) {}
   }
 
   @override
@@ -151,7 +167,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       _state = GameState.paused;
     } else if (_state == GameState.paused) {
       _state = GameState.playing;
-      _lastTick = Duration.zero; // resync para evitar salto
+      _lastTick = Duration.zero;
     }
     setState(() {});
   }
@@ -167,7 +183,6 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     final dt = (now - _lastTick).inMicroseconds / 1e6;
     _lastTick = now;
-
     if (_size == Size.zero) return;
 
     // Integración
@@ -175,25 +190,12 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     double x = _ball.dx + _vel.dx * dt;
     double y = _ball.dy + _vel.dy * dt;
 
-    // Paredes laterales
-    if (x - _ballRadius < 0) {
-      x = _ballRadius;
-      _vel = Offset(-_vel.dx, _vel.dy);
-      _playBounce();
-    } else if (x + _ballRadius > _size.width) {
-      x = _size.width - _ballRadius;
-      _vel = Offset(-_vel.dx, _vel.dy);
-      _playBounce();
-    }
+    // Paredes
+    if (x - _ballRadius < 0) { x = _ballRadius; _vel = Offset(-_vel.dx, _vel.dy); _playBounce(); }
+    else if (x + _ballRadius > _size.width) { x = _size.width - _ballRadius; _vel = Offset(-_vel.dx, _vel.dy); _playBounce(); }
+    if (y - _ballRadius < 0) { y = _ballRadius; _vel = Offset(_vel.dx, -_vel.dy); _playBounce(); }
 
-    // Techo
-    if (y - _ballRadius < 0) {
-      y = _ballRadius;
-      _vel = Offset(_vel.dx, -_vel.dy);
-      _playBounce();
-    }
-
-    // Colisión paleta
+    // Paleta
     final paddle = _paddle;
     final hitsHorizontally = x >= paddle.left && x <= paddle.right;
     final crossedTop = (prev.dy + _ballRadius) <= paddle.top && (y + _ballRadius) >= paddle.top;
@@ -209,14 +211,16 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       _vel = Offset(newVx.toDouble(), newVy.toDouble());
       _score += 1;
       _playBounce();
+      _maybeSaveBest(); // <<-- actualiza récord si corresponde
     }
 
-    // Piso: vida o game over
+    // Piso
     if (y - _ballRadius > _size.height) {
       _lives -= 1;
       if (_lives <= 0) {
         _state = GameState.gameOver;
         _playGameOver();
+        _maybeSaveBest(); // <<-- también al terminar la partida
       } else {
         _centerBall(towardsDown: true);
         _speedMultiplier = max(1.0, _speedMultiplier * 0.95);
@@ -225,9 +229,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       return;
     }
 
-    setState(() {
-      _ball = Offset(x, y);
-    });
+    setState(() { _ball = Offset(x, y); });
   }
 
   void _onDrag(DragUpdateDetails d) {
@@ -242,22 +244,9 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   KeyEventResult _onKey(FocusNode node, RawKeyEvent evt) {
     if (evt is RawKeyDownEvent) {
       final key = evt.logicalKey;
-      if (key.keyLabel.toLowerCase() == 'p') {
-        _togglePause();
-        return KeyEventResult.handled;
-      }
-      // Flechas izquierda/derecha para mover paleta
-      if (key == LogicalKeyboardKey.arrowLeft) {
-        _paddleCx = max(_paddleWidth / 2, _paddleCx - 24);
-        setState(() {});
-        return KeyEventResult.handled;
-      }
-      if (key == LogicalKeyboardKey.arrowRight) {
-        _paddleCx = min(_size.width - _paddleWidth / 2, _paddleCx + 24);
-        setState(() {});
-        return KeyEventResult.handled;
-      }
-      // Enter/Espacio para empezar o reiniciar
+      if (key.keyLabel.toLowerCase() == 'p') { _togglePause(); return KeyEventResult.handled; }
+      if (key == LogicalKeyboardKey.arrowLeft)  { _paddleCx = max(_paddleWidth / 2, _paddleCx - 24); setState(() {}); return KeyEventResult.handled; }
+      if (key == LogicalKeyboardKey.arrowRight) { _paddleCx = min(_size.width - _paddleWidth / 2, _paddleCx + 24); setState(() {}); return KeyEventResult.handled; }
       if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.space) {
         if (_state == GameState.ready) _startGame();
         else if (_state == GameState.gameOver) { _resetScene(hard: true); setState(() {}); }
@@ -314,15 +303,15 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                         children: [
                           const Text("Pong del Curso",
                               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
-                          Row(
+                          Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            spacing: 8,
                             children: [
-                              const Text("Paso 07: sonidos + pausa",
+                              const Text("Paso 08: récord guardado",
                                   style: TextStyle(fontSize: 14, color: Colors.white70)),
-                              const SizedBox(width: 12),
                               _Pill(text: "Puntos: $_score"),
-                              const SizedBox(width: 8),
                               _Pill(text: "Vidas: $_lives"),
-                              const SizedBox(width: 12),
+                              _Pill(text: "Best: $_best"),
                               _PauseButton(
                                 isPaused: _state == GameState.paused,
                                 onToggle: _togglePause,
