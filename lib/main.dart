@@ -7,16 +7,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PongApp());
+  runApp(const PnBallApp());
 }
 
-class PongApp extends StatelessWidget {
-  const PongApp({super.key});
+class PnBallApp extends StatelessWidget {
+  const PnBallApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Pong del Curso',
+      title: 'PnBall',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0F111A),
@@ -24,6 +24,7 @@ class PongApp extends StatelessWidget {
           seedColor: Colors.greenAccent,
           brightness: Brightness.dark,
         ),
+        textTheme: ThemeData.dark().textTheme.apply(fontFamily: 'Roboto'),
       ),
       home: const GamePage(),
     );
@@ -31,6 +32,22 @@ class PongApp extends StatelessWidget {
 }
 
 enum GameState { ready, playing, paused, gameOver }
+
+class Particle {
+  Particle({
+    required this.pos,
+    required this.vel,
+    required this.life,
+    required this.size,
+    required this.color,
+  });
+
+  Offset pos;
+  Offset vel;
+  double life; // segundos restantes
+  double size;
+  Color color;
+}
 
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
@@ -41,7 +58,7 @@ class GamePage extends StatefulWidget {
 class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin {
   // Parámetros de escena
   final double _ballRadius = 10.0;
-  final double _paddleWidth = 100.0;
+  final double _paddleWidth = 110.0;
   final double _paddleHeight = 14.0;
 
   // Animación
@@ -57,9 +74,11 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   int _score = 0;
   int _lives = 3;
   double _speedMultiplier = 1.0;
-
-  // Récord (persistente)
   int _best = 0;
+
+  // Partículas
+  final List<Particle> _particles = [];
+  final _rand = Random();
 
   // Audio
   final _bounceSfx = AudioPlayer()..setReleaseMode(ReleaseMode.stop);
@@ -80,7 +99,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     _resetScene(hard: true);
     _ticker = createTicker(_onTick)..start();
     _preloadSounds();
-    _loadBestScore(); // <<-- Cargar récord guardado
+    _loadBestScore();
   }
 
   Future<void> _preloadSounds() async {
@@ -137,15 +156,15 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
       _lives = 3;
       _speedMultiplier = 1.0;
     }
+    _particles.clear();
     _centerBall(towardsDown: true);
     _paddleCx = _size == Size.zero ? 150 : _size.width / 2;
     _state = GameState.ready;
   }
 
   void _centerBall({required bool towardsDown}) {
-    final rand = Random();
-    final baseX = (rand.nextBool() ? 1 : -1) * (160 + rand.nextInt(120));
-    final baseY = (towardsDown ? 1 : -1) * (220 + rand.nextInt(160));
+    final baseX = (_rand.nextBool() ? 1 : -1) * (160 + _rand.nextInt(120));
+    final baseY = (towardsDown ? 1 : -1) * (220 + _rand.nextInt(160));
     if (_size == Size.zero) {
       _ball = const Offset(120, 120);
     } else {
@@ -172,6 +191,31 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     setState(() {});
   }
 
+  void _spawnBurst(Offset at, {int count = 20, double speed = 240, Color? color}) {
+    for (var i = 0; i < count; i++) {
+      final ang = _rand.nextDouble() * pi * 2;
+      final spd = speed * (0.6 + _rand.nextDouble() * 0.8);
+      final vel = Offset(cos(ang), sin(ang)) * spd;
+      _particles.add(Particle(
+        pos: at,
+        vel: vel,
+        life: 0.6 + _rand.nextDouble() * 0.4,
+        size: 2 + _rand.nextDouble() * 2.5,
+        color: (color ?? Colors.greenAccent).withOpacity(0.9),
+      ));
+    }
+  }
+
+  void _updateParticles(double dt) {
+    for (final p in _particles) {
+      p.pos += p.vel * dt;
+      p.vel *= 0.96;               // fricción
+      p.life -= dt;
+      p.size = (p.size * 0.995).clamp(0.5, 6.0);
+    }
+    _particles.removeWhere((p) => p.life <= 0);
+  }
+
   void _onTick(Duration now) {
     if (_state != GameState.playing) {
       _lastTick = now;
@@ -183,6 +227,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     }
     final dt = (now - _lastTick).inMicroseconds / 1e6;
     _lastTick = now;
+
     if (_size == Size.zero) return;
 
     // Integración
@@ -190,10 +235,26 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     double x = _ball.dx + _vel.dx * dt;
     double y = _ball.dy + _vel.dy * dt;
 
-    // Paredes
-    if (x - _ballRadius < 0) { x = _ballRadius; _vel = Offset(-_vel.dx, _vel.dy); _playBounce(); }
-    else if (x + _ballRadius > _size.width) { x = _size.width - _ballRadius; _vel = Offset(-_vel.dx, _vel.dy); _playBounce(); }
-    if (y - _ballRadius < 0) { y = _ballRadius; _vel = Offset(_vel.dx, -_vel.dy); _playBounce(); }
+    bool bounced = false;
+    Offset bouncePoint = Offset.zero;
+
+    // Paredes laterales
+    if (x - _ballRadius < 0) {
+      x = _ballRadius;
+      _vel = Offset(-_vel.dx, _vel.dy);
+      bounced = true; bouncePoint = Offset(0, y);
+    } else if (x + _ballRadius > _size.width) {
+      x = _size.width - _ballRadius;
+      _vel = Offset(-_vel.dx, _vel.dy);
+      bounced = true; bouncePoint = Offset(_size.width, y);
+    }
+
+    // Techo
+    if (y - _ballRadius < 0) {
+      y = _ballRadius;
+      _vel = Offset(_vel.dx, -_vel.dy);
+      bounced = true; bouncePoint = Offset(x, 0);
+    }
 
     // Paleta
     final paddle = _paddle;
@@ -204,32 +265,45 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
     if (goingDown && hitsHorizontally && crossedTop) {
       y = paddle.top - _ballRadius;
       final offsetX = ((x - paddle.center.dx) / (paddle.width / 2)).clamp(-1.0, 1.0);
-      _speedMultiplier = min(_speedMultiplier * 1.04, 2.2);
+      _speedMultiplier = min(_speedMultiplier * 1.045, 2.25);
       final baseBoost = 240.0 * _speedMultiplier;
-      final newVx = (_vel.dx + baseBoost * offsetX).clamp(-600, 600);
+      final newVx = (_vel.dx + baseBoost * offsetX).clamp(-620, 620);
       final newVy = -_vel.dy.abs() * (1.02 + 0.02 * _speedMultiplier);
       _vel = Offset(newVx.toDouble(), newVy.toDouble());
       _score += 1;
+      _maybeSaveBest();
+
+      bounced = true; bouncePoint = Offset(x, paddle.top);
+      _spawnBurst(bouncePoint, count: 24, speed: 300, color: Colors.greenAccent);
       _playBounce();
-      _maybeSaveBest(); // <<-- actualiza récord si corresponde
     }
 
     // Piso
     if (y - _ballRadius > _size.height) {
       _lives -= 1;
+      _spawnBurst(Offset(x, _size.height), count: 32, speed: 340, color: Colors.redAccent);
       if (_lives <= 0) {
         _state = GameState.gameOver;
         _playGameOver();
-        _maybeSaveBest(); // <<-- también al terminar la partida
       } else {
         _centerBall(towardsDown: true);
         _speedMultiplier = max(1.0, _speedMultiplier * 0.95);
       }
-      setState(() {});
+      setState(() {}); // actualizar HUD y partículas
       return;
     }
 
-    setState(() { _ball = Offset(x, y); });
+    if (bounced) {
+      _spawnBurst(bouncePoint, count: 18, speed: 260, color: Colors.white);
+      _playBounce();
+    }
+
+    // Actualiza partículas y estado
+    _updateParticles(dt);
+
+    setState(() {
+      _ball = Offset(x, y);
+    });
   }
 
   void _onDrag(DragUpdateDetails d) {
@@ -289,6 +363,7 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                           ballCenter: _ball,
                           ballRadius: _ballRadius,
                           paddleRect: _paddle,
+                          particles: _particles,
                         ),
                       ),
                     ),
@@ -301,13 +376,13 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text("Pong del Curso",
-                              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
+                          const Text("PnBall",
+                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20)),
                           Wrap(
                             crossAxisAlignment: WrapCrossAlignment.center,
                             spacing: 8,
                             children: [
-                              const Text("Paso 08: récord guardado",
+                              const Text("Final del curso",
                                   style: TextStyle(fontSize: 14, color: Colors.white70)),
                               _Pill(text: "Puntos: $_score"),
                               _Pill(text: "Vidas: $_lives"),
@@ -326,17 +401,17 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
                     // Overlays
                     if (_state == GameState.ready) _overlayCenter(
                       title: "Toca para comenzar",
-                      subtitle: "Arrastra para mover la paleta\nTecla P: Pausa/Continuar",
+                      subtitle: "Arrastra para mover la paleta\nP: Pausa/Continuar",
                       icon: Icons.play_arrow_rounded,
                     ),
                     if (_state == GameState.paused) _overlayCenter(
                       title: "Pausa",
-                      subtitle: "Toca el botón ▷ o presiona P para continuar",
+                      subtitle: "Pulsa P o el botón ▷ para continuar",
                       icon: Icons.pause_rounded,
                     ),
                     if (_state == GameState.gameOver) _overlayCenter(
                       title: "Game Over",
-                      subtitle: "Toca para reiniciar (o Enter/Espacio)",
+                      subtitle: "Toca para reiniciar (Enter/Espacio)",
                       icon: Icons.replay_rounded,
                     ),
                   ],
@@ -392,11 +467,13 @@ class _GamePainter extends CustomPainter {
     required this.ballCenter,
     required this.ballRadius,
     required this.paddleRect,
+    required this.particles,
   });
 
   final Offset ballCenter;
   final double ballRadius;
   final Rect paddleRect;
+  final List<Particle> particles;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -428,6 +505,15 @@ class _GamePainter extends CustomPainter {
       y += dashWidth + dashSpace;
     }
 
+    // Partículas (fondo)
+    for (final p in particles) {
+      final alpha = (p.life.clamp(0.0, 1.0) * 255).toInt();
+      final paint = Paint()
+        ..color = p.color.withAlpha(alpha)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(p.pos, p.size, paint);
+    }
+
     // Pelota
     canvas.drawCircle(ballCenter, ballRadius, paintBall);
 
@@ -442,7 +528,8 @@ class _GamePainter extends CustomPainter {
   bool shouldRepaint(covariant _GamePainter old) {
     return old.ballCenter != ballCenter ||
         old.ballRadius != ballRadius ||
-        old.paddleRect != paddleRect;
+        old.paddleRect != paddleRect ||
+        old.particles != particles;
   }
 }
 
